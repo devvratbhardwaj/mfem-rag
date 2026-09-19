@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"markdown.preview.fontSize":16,
+		"notebook.markup.fontSize": 14,
+		"workbench.colorCustomizations": {
+			"foreground": "#949494"
+		  } 
+	}
+}
