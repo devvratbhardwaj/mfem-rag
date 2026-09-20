@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+## Brainstorming / Decisions / Assumptions
+brainstorming/
+decisions/
+
 # C extensions
 *.so
 
@@ -431,3 +435,6 @@ workspace.json
 /docs/site
 /docs/node_modules
 /docs/.vitepress/cache
+
+# Crawled corpus (module 1)
+data/
