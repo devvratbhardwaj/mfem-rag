@@ -7,6 +7,8 @@
 #            `path`; {page} is its MkDocs directory-style address
 #   content  html only: CSS selector for the documentation part of each page
 #   drop     html only: CSS selectors removed from inside `content`
+#   flatten  html only: CSS selectors replaced by a one-line code block of
+#            their text - for code laid out with tables
 #   margins  pdf only: [left, top, right, bottom] points ignored on every
 #            page - where running headers and footers sit
 
@@ -22,6 +24,9 @@ drop = [
     "div.dyncontent",     # ... and the diagrams
     "span.permalink",     # the diamond glyph before each member heading
     "p.definition",       # "Definition at line N of file F."
+]
+flatten = [
+    "div.memproto",       # member signatures, laid out as nested tables
 ]
 
 [[source]]

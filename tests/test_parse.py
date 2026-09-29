@@ -56,3 +56,24 @@ def test_html_source_uses_content_region_and_keeps_identifiers(tmp_path):
     assert "See Foo_bar." in record["text"]
     assert "Site menu" not in record["text"]
     assert "Definition at line" not in record["text"]
+
+
+def test_html_source_flattens_layout_tables_into_code(tmp_path):
+    (tmp_path / "page.html").write_text(
+        "<html><body><div class='contents'><h2>Assemble()</h2>"
+        "<div class='memproto'><div class='memtemplate'>template&lt;typename T &gt;</div>"
+        "<table class='mlabels'><tr><td class='mlabels-left'><table class='memname'>"
+        "<tr><td class='memname'>void A::Assemble</td><td>(</td>"
+        "<td class='paramtype'>T &amp;&#160;</td><td class='paramname'><em>info</em>, </td></tr>"
+        "<tr><td></td><td></td><td class='paramtype'>const <a href='x.html'>mfem::Vector</a> &amp;&#160;</td>"
+        "<td class='paramname'><em>x</em>&#160;)</td></tr>"
+        "</table></td><td class='mlabels-right'><span class='mlabel'>inline</span></td></tr></table></div>"
+        "<p>Assembles the operator.</p></div></body></html>"
+    )
+    [record] = parse_source({
+        "name": "s", "format": "html", "path": str(tmp_path),
+        "url": "https://x.org/{path}", "content": "div.contents", "flatten": ["div.memproto"],
+    })
+    assert "```\ntemplate<typename T > void A::Assemble(T & info, const mfem::Vector & x) inline\n```" in record["text"]
+    assert "|" not in record["text"]
+    assert "Assembles the operator." in record["text"]

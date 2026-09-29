@@ -41,7 +41,9 @@ def parse_source(source: dict) -> list[dict]:
             title, sections = pdf_sections(file, url, source.get("margins", [0, 0, 0, 0]))
         else:
             if source["format"] == "html":
-                title, markdown = html_to_markdown(file, source.get("content"), source.get("drop", []))
+                title, markdown = html_to_markdown(
+                    file, source.get("content"), source.get("drop", []), source.get("flatten", [])
+                )
             else:
                 markdown = file.read_text(encoding="utf-8")
                 title = None
@@ -66,10 +68,12 @@ def parse_source(source: dict) -> list[dict]:
     return records
 
 
-def html_to_markdown(file: Path, content: str | None, drop: list[str]) -> tuple[str | None, str]:
+def html_to_markdown(
+    file: Path, content: str | None, drop: list[str], flatten: list[str]
+) -> tuple[str | None, str]:
     """The page's <title>, and its Markdown. The `content` CSS selector picks
     the documentation out of the page chrome; `drop` selectors remove what is
-    left of it inside."""
+    left of it inside; `flatten` selectors become one-line code blocks."""
     soup = BeautifulSoup(file.read_text(encoding="utf-8", errors="replace"), "html.parser")
     title = soup.title.get_text(strip=True) if soup.title else None
     node = soup.select_one(content) if content else soup.body
@@ -78,6 +82,11 @@ def html_to_markdown(file: Path, content: str | None, drop: list[str]) -> tuple[
     for selector in drop:
         for element in node.select(selector):
             element.decompose()
+    for selector in flatten:
+        for element in node.select(selector):
+            pre = soup.new_tag("pre")
+            pre.string = one_line(element.get_text(" "))
+            element.replace_with(pre)
     # Links point into the site's own layout: keep their text, drop the targets.
     # No Markdown escaping, so identifiers like boundary_integs stay searchable.
     markdown = markdownify(
@@ -85,6 +94,14 @@ def html_to_markdown(file: Path, content: str | None, drop: list[str]) -> tuple[
         escape_underscores=False, escape_asterisks=False, escape_misc=False,
     )
     return title, markdown
+
+
+def one_line(text: str) -> str:
+    """Text laid out in table cells, as one line of code: whitespace
+    collapsed, none inside parentheses or before commas."""
+    text = " ".join(text.split())
+    text = re.sub(r"\s+([(),])", r"\1", text)
+    return re.sub(r"\(\s+", "(", text)
 
 
 def pdf_sections(file: Path, url: str, margins: list[float]) -> tuple[str | None, list[tuple[list[str], str, str, int]]]:
