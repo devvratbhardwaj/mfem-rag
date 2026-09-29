@@ -1,0 +1,45 @@
+# The documentation corpus. Swapping in another corpus means editing this file.
+#
+#   name     output file stem and the prefix of every section id
+#   format   html | markdown | pdf
+#   path     a file, or a directory searched recursively (relative to this file)
+#   url      where a citation points. {path} is the file's path relative to
+#            `path`; {page} is its MkDocs directory-style address
+#   content  html only: CSS selector for the documentation part of each page
+#   drop     html only: CSS selectors removed from inside `content`
+#   margins  pdf only: [left, top, right, bottom] points ignored on every
+#            page - where running headers and footers sit
+
+[[source]]
+name = "mfem-doxygen"
+format = "html"
+path = "data/raw/mfem-doxygen"
+url = "https://docs.mfem.org/4.10/{path}"
+content = "div.contents"
+drop = [
+    "table.memberdecls",  # member summary tables; the detailed docs repeat them
+    "div.dynheader",      # "Inheritance diagram for ..." toggles
+    "div.dyncontent",     # ... and the diagrams
+    "span.permalink",     # the diamond glyph before each member heading
+    "p.definition",       # "Definition at line N of file F."
+]
+
+[[source]]
+name = "mfem-web"
+format = "markdown"
+path = "data/raw/mfem-web/src"
+url = "https://mfem.org/{page}"
+
+[[source]]
+name = "petsc-manual"
+format = "pdf"
+path = "data/raw/pdf/petsc-manual.pdf"
+url = "https://petsc.org/release/manual/manual.pdf"
+margins = [0, 60, 0, 60]
+
+[[source]]
+name = "slepc-manual"
+format = "pdf"
+path = "data/raw/pdf/slepc-manual.pdf"
+url = "https://slepc.upv.es/release/documentation/manual/slepc-manual.pdf"
+margins = [0, 60, 0, 60]
