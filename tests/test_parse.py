@@ -32,7 +32,8 @@ def test_markdown_source(tmp_path):
     records = parse_source({"name": "s", "format": "markdown", "path": str(tmp_path), "url": "https://x.org/{page}"})
     assert [r["metadata"]["headings"] for r in records] == [["Guide"], ["Guide", "Build"]]
     assert "# not a heading" in records[1]["text"]
-    assert records[1]["id"] == "s/guide.md#1"
+    assert records[1]["id"].startswith('s/guide.md@')
+    assert records[1]["id"].endswith(':1')
     assert records[1]["metadata"]["title"] == "Guide"
     assert records[1]["metadata"]["url"] == "https://x.org/guide/"
 
@@ -53,7 +54,7 @@ def test_html_source_uses_content_region_and_keeps_identifiers(tmp_path):
     record = records[0]
     assert record["metadata"]["title"] == "Page Title"
     assert record["metadata"]["headings"] == ["boundary_integs"]
-    assert "See Foo_bar." in record["text"]
+    assert "See [Foo_bar](https://x.org/x.html)." in record["text"]
     assert "Site menu" not in record["text"]
     assert "Definition at line" not in record["text"]
 

@@ -1,7 +1,7 @@
-# The documentation corpus. Swapping in another corpus means editing this file.
+# Parsing configuration. Configure acquisition URLs/lists in scripts/crawl.py.
 #
 #   name     output file stem and the prefix of every section id
-#   format   html | markdown | pdf
+#   format   html | markdown | pdf | code
 #   path     a file, or a directory searched recursively (relative to this file)
 #   url      where a citation points. {path} is the file's path relative to
 #            `path`; {page} is its MkDocs directory-style address
@@ -34,6 +34,7 @@ name = "mfem-web"
 format = "markdown"
 path = "data/raw/mfem-web/src"
 url = "https://mfem.org/{page}"
+exclude = ["index.md", "search.md", "workshop*.md", "seminar.md", "videos.md", "tutorial/aws/index.md"]
 
 [[source]]
 name = "petsc-manual"
@@ -41,6 +42,31 @@ format = "pdf"
 path = "data/raw/pdf/petsc-manual.pdf"
 url = "https://petsc.org/release/manual/manual.pdf"
 margins = [0, 60, 0, 60]
+
+[[source]]
+name = "mfem-examples"
+format = "code"
+path = "data/raw/mfem-examples/examples"
+url = "https://github.com/mfem/mfem/blob/v4.10/examples/{path}"
+optional = true  # until fetched with scripts/crawl.py --source mfem-examples
+
+[[source]]
+name = "petsc-html"
+format = "html"
+path = "data/raw/petsc-html"
+url = "https://petsc.org/release/{page}"
+content = "article.bd-article"
+drop = ["a.headerlink", "nav", "div.admonition-todo"]
+optional = true
+
+[[source]]
+name = "slepc-html"
+format = "html"
+path = "data/raw/slepc-html"
+url = "https://slepc.upv.es/release/{path}"
+content = "article.bd-article"
+drop = ["a.headerlink", "nav"]
+optional = true
 
 [[source]]
 name = "slepc-manual"

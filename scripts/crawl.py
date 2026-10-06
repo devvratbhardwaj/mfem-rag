@@ -16,6 +16,7 @@ that already exists is removed and re-fetched.
 """
 
 import json
+import argparse
 import re
 import shutil
 import subprocess
@@ -37,6 +38,30 @@ MFEM_DOXYGEN = "https://docs.mfem.org/4.10"
 
 MFEM_WEB_REPO = "mfem/web"
 MFEM_WEB_REF = "master"
+
+# Edit these lists and URLs here before fetching, as with the PDF sources above.
+MFEM_CODE_REF = 'v4.10'
+MFEM_EXAMPLE_DIRS = ('examples/petsc/',)
+PETSC_HTML = 'https://petsc.org/release/'
+PETSC_HTML_PATHS = [
+    'manual/ksp/index.html',
+    'manualpages/KSP/KSPSetTolerances/index.html',
+    'manualpages/KSP/KSPSetFromOptions/index.html',
+    'manualpages/KSP/KSPGMRES/index.html',
+    'manualpages/PC/PCGAMG/index.html',
+    'manualpages/PC/PCSetType/index.html',
+]
+SLEPC_HTML = 'https://slepc.upv.es/release/'
+SLEPC_HTML_PATHS = [
+    'documentation/manual/intro.html',
+    'documentation/manual/eps.html',
+    'documentation/manual/st.html',
+    'manualpages/EPS/EPSSetFromOptions.html',
+    'manualpages/EPS/EPSSetTolerances.html',
+    'manualpages/EPS/EPSSetOperators.html',
+    'manualpages/EPS/EPSSetProblemType.html',
+    'manualpages/ST/STSetType.html',
+]
 
 
 def keep_doxygen_page(name: str) -> bool:
@@ -78,6 +103,8 @@ def download(urls: dict[str, str], destination: Path) -> None:
     --fail makes any 404 abort the run: a silently short corpus is worse than a
     crash.
     """
+    if not urls:
+        raise ValueError('Refusing an empty download list.')
     config = "\n".join(
         f'url = "{url}"\noutput = "{destination / path}"'
         for path, url in sorted(urls.items())
@@ -85,6 +112,7 @@ def download(urls: dict[str, str], destination: Path) -> None:
     subprocess.run(
         [
             "curl", "-sS", "--fail", "--retry", "2",
+            '--location', '--connect-timeout', '20', '--max-time', '180',
             "--create-dirs",
             "--parallel", "--parallel-max", "16",
             "--config", "-",
@@ -135,6 +163,8 @@ def fetch_mfem_web(name: str) -> None:
             f"https://api.github.com/repos/{MFEM_WEB_REPO}/git/trees/{MFEM_WEB_REF}?recursive=1"
         )
     )
+    if tree.get('truncated'):
+        raise ValueError('GitHub returned a truncated MFEM website tree.')
     paths = [
         entry["path"]
         for entry in tree["tree"]
@@ -145,6 +175,29 @@ def fetch_mfem_web(name: str) -> None:
 
     provenance(destination, f"repo: github.com/{MFEM_WEB_REPO}\nref: {MFEM_WEB_REF}\ntree: {tree['sha']}\n")
     print(f"    {tree['sha'][:12]}  {describe(destination)}", flush=True)
+
+
+def fetch_html(name: str, base: str, paths: list[str]) -> None:
+    print(f'==> {name}: {len(paths)} selected HTML pages', flush=True)
+    destination = reset(name)
+    download({path: base + path for path in paths}, destination)
+    provenance(destination, f'source: {base}\npages: {len(paths)}\n')
+
+
+def fetch_mfem_examples(name: str) -> None:
+    print(f'==> {name}: MFEM integration examples @ {MFEM_CODE_REF}', flush=True)
+    tree = json.loads(curl(f'https://api.github.com/repos/mfem/mfem/git/trees/{MFEM_CODE_REF}?recursive=1'))
+    if tree.get('truncated'):
+        raise ValueError('GitHub returned a truncated MFEM code tree.')
+    paths = [entry['path'] for entry in tree['tree']
+             if entry['path'].startswith(MFEM_EXAMPLE_DIRS)
+             and entry['path'].endswith(('.cpp', '.hpp', '.opts'))]
+    if not paths:
+        raise ValueError('No MFEM integration examples matched MFEM_EXAMPLE_DIRS.')
+    destination = reset(name)
+    base = f'https://raw.githubusercontent.com/mfem/mfem/{MFEM_CODE_REF}/'
+    download({path: base + path for path in paths}, destination)
+    provenance(destination, f'repo: github.com/mfem/mfem\nref: {MFEM_CODE_REF}\ntree: {tree["sha"]}\n')
 
 
 def reset(name: str) -> Path:
@@ -165,10 +218,24 @@ def describe(directory: Path) -> str:
 
 
 def main() -> None:
-    for filename, url in PDFS.items():
-        fetch_pdf(filename, url)
-    fetch_mfem_doxygen("mfem-doxygen")
-    fetch_mfem_web("mfem-web")
+    choices = ['pdf', 'mfem-doxygen', 'mfem-web', 'mfem-examples', 'petsc-html', 'slepc-html']
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--source', choices=choices, action='append', help='fetch only these sources; repeatable')
+    selected = parser.parse_args().source or choices
+    for name in selected:
+        if name == 'pdf':
+            for filename, url in PDFS.items():
+                fetch_pdf(filename, url)
+        elif name == 'mfem-doxygen':
+            fetch_mfem_doxygen(name)
+        elif name == 'mfem-web':
+            fetch_mfem_web(name)
+        elif name == 'mfem-examples':
+            fetch_mfem_examples(name)
+        elif name == 'petsc-html':
+            fetch_html(name, PETSC_HTML, PETSC_HTML_PATHS)
+        elif name == 'slepc-html':
+            fetch_html(name, SLEPC_HTML, SLEPC_HTML_PATHS)
     print(f"\ncorpus: {describe(RAW_DIR)} under {RAW_DIR}", flush=True)
 
 

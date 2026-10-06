@@ -1,150 +1,255 @@
-"""Module 3 - chunking
-
-Turns the parsed sections into chunks to embed. Two strategies, to compare:
-
-    recursive   each document as one text, cut by RecursiveCharacterTextSplitter
-                (paragraphs, then lines, then words) with overlap. Ignores
-                section boundaries. The baseline.
-    structured  each section is a chunk. Sections over `size` are cut on
-                paragraphs, keeping code blocks and tables whole; runs of
-                sections under `min_size` are merged within their document.
-                Every chunk is prefixed with its title and headings.
-
-Output: data/chunks/<strategy>-<size>.jsonl, one chunk per line:
-    {"id": ..., "text": ..., "body": ...,
-     "metadata": {"source", "doc", "title", "headings", "url", "page", "sections", "strategy"}}
-`text` is what gets embedded and shown to the model; `body` is the document's
-own text, for display. `sections` lists the parsed section ids the chunk
-draws on - the stable ids a benchmark can label relevance with, since chunk
-ids change with the strategy.
+"""Chunk parsed sections with complete citations and identifiable configurations.
 
     uv run scripts/chunk.py --strategy structured --size 1200
+    uv run scripts/chunk.py --unit tokens --tokenizer /path/to/tokenizer.json --size 384
+
+Tokenizers are loaded from local files; this command never downloads models.
 """
 
 import argparse
 import json
+import re
 from pathlib import Path
+from typing import Callable
+from importlib.metadata import version
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from mfem_rag.artifacts import SCHEMA_VERSION, fingerprint, file_hash, load_parsed, write_json, write_jsonl
+from mfem_rag.markdown import FENCE, blocks, closes_fence
+
 ROOT = Path(__file__).resolve().parents[2]
+Measure = Callable[[str], int]
 
 
-def chunk_recursive(records: list[dict], size: int = 1200, overlap: int = 150) -> list[dict]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=size, chunk_overlap=overlap, add_start_index=True)
-    chunks = []
-    for sections in by_document(records):
-        # Join the document back together, remembering where each section starts
-        starts, offset = [], 0
-        for s in sections:
-            starts.append(offset)
-            offset += len(s["text"]) + 2
-        text = "\n\n".join(s["text"] for s in sections)
-
-        pieces = splitter.create_documents([text])
-        for i, piece in enumerate(pieces):
-            start = piece.metadata["start_index"]
-            end = start + len(piece.page_content)
-            covered = [s for s, begin in zip(sections, starts) if begin < end and begin + len(s["text"]) > start]
-            chunks.append(make_chunk("recursive", i, piece.page_content, piece.page_content,
-                                     covered, covered[0]["metadata"]["headings"]))
-    return chunks
+def splitter_measure(measure: Measure) -> Measure:
+    """Do not count document-level special tokens once per separator/word."""
+    special_tokens = measure('')
+    return lambda value: max(0, measure(value) - special_tokens)
 
 
-def chunk_structured(records: list[dict], size: int = 1200, min_size: int = 300) -> list[dict]:
-    chunks = []
-    for sections in by_document(records):
-        # (body, section) units: whole sections, or the pieces of oversized ones
-        units = [(piece, s) for s in sections for piece in split(s["text"].strip(), size)]
-
-        groups: list[list[tuple[str, dict]]] = []
-        for unit in units:
-            if groups and mergeable(groups[-1], unit, size, min_size):
-                groups[-1].append(unit)
-            else:
-                groups.append([unit])
-
-        for i, group in enumerate(groups):
-            covered = [s for _, s in group]
-            heads = common_prefix([s["metadata"]["headings"] for s in covered])
-            body = "\n\n".join(piece for piece, _ in group)
-            text = f"{header(covered[0]['metadata']['title'], heads)}\n\n{body}"
-            chunks.append(make_chunk("structured", i, text, body, covered, heads))
-    return chunks
+def validate(size: int, overlap: int = 0, min_size: int = 0) -> None:
+    if size <= 0 or not 0 <= overlap < size or not 0 <= min_size <= size:
+        raise ValueError('Require size > 0, 0 <= overlap < size, and 0 <= min_size <= size.')
 
 
-STRATEGIES = {"recursive": chunk_recursive, "structured": chunk_structured}
+def configuration(strategy, size, overlap=0, min_size=0, budget_id='characters'):
+    return {'schema_version': SCHEMA_VERSION, 'strategy': strategy, 'size': size,
+            'overlap': overlap, 'min_size': min_size, 'budget': budget_id,
+            'chunker_sha256': file_hash(Path(__file__)),
+            'markdown_sha256': file_hash(Path(__file__).with_name('markdown.py')),
+            'libraries': {name: version(name) for name in ['langchain-text-splitters', 'tokenizers']}}
 
 
 def by_document(records: list[dict]) -> list[list[dict]]:
-    """Sections grouped by document, in their original order."""
-    docs: dict[tuple[str, str], list[dict]] = {}
-    for r in records:
-        docs.setdefault((r["metadata"]["source"], r["metadata"]["doc"]), []).append(r)
+    docs = {}
+    for record in records:
+        if not record['text'].strip():
+            continue
+        docs.setdefault((record['metadata']['source'], record['metadata']['doc']), []).append(record)
     return list(docs.values())
 
 
-def split(text: str, size: int) -> list[str]:
-    """The text if it fits; otherwise its blocks packed into pieces of at most
-    `size`. A block too big on its own is cut by the recursive splitter."""
-    if len(text) <= size:
-        return [text]
-    fallback = RecursiveCharacterTextSplitter(chunk_size=size, chunk_overlap=0)
-    pieces: list[str] = []
-    current = ""
+def active_fence(text: str) -> str | None:
+    active = None
+    for line in text.splitlines():
+        if active:
+            if closes_fence(line, FENCE.match(active)[1]):
+                active = None
+        elif FENCE.match(line):
+            active = line
+    return active
+
+
+def repair_piece(body: str, preceding: str) -> str:
+    """Give a baseline substring the fence context it had in the full document."""
+    active = active_fence(preceding)
+    if active:
+        body = active + '\n' + body
+    trailing = active_fence(body)
+    if trailing:
+        body += '\n' + FENCE.match(trailing)[1]
+    return body
+
+
+def chunk_recursive(records: list[dict], size: int = 1200, overlap: int = 150,
+                    measure: Measure = len, budget_id: str = 'characters') -> list[dict]:
+    validate(size, overlap)
+    config = configuration('recursive', size, overlap=overlap, budget_id=budget_id)
+    identity = fingerprint({'config': config, 'records': records})[:16]
+    chunks = []
+    for sections in by_document(records):
+        starts, offset = [], 0
+        for section in sections:
+            starts.append(offset)
+            offset += len(section['text']) + 2
+        text = '\n\n'.join(section['text'] for section in sections)
+        # Reserve room for fence context; retry with a smaller effective budget
+        # if the tokenizer's nonadditive lengths require more room.
+        effective = size
+        while True:
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=effective, chunk_overlap=min(overlap, effective - 1),
+                length_function=splitter_measure(measure), add_start_index=False, strip_whitespace=False)
+            bodies = splitter.split_text(text)
+            pieces, cursor = [], 0
+            for body in bodies:
+                # Find in document order; overlap may repeat part of the previous body.
+                start = text.find(body, cursor)
+                if start < 0:
+                    raise ValueError('Cannot map recursive chunk back to source text.')
+                end = start + len(body)
+                rendered = repair_piece(body, text[:start])
+                pieces.append((start, end, rendered))
+                # Search after the previous start (not end), independent of token units.
+                cursor = start + 1
+            excess = max((measure(body) - size for _, _, body in pieces), default=0)
+            if excess <= 0:
+                break
+            effective -= max(excess, 1)
+            if effective <= 0:
+                raise ValueError('Budget cannot fit recursive code fence context; increase --size.')
+        for i, (start, end, body) in enumerate(pieces):
+            covered = [section for section, begin in zip(sections, starts)
+                       if begin < end and begin + len(section['text']) > start]
+            if not covered:
+                continue
+            chunk = make_chunk('recursive', i, body, body, covered,
+                               covered[0]['metadata']['headings'], identity, config)
+            # Exact section-relative spans before fence context is added.
+            for location, section in zip(chunk['metadata']['locations'], covered):
+                begin = starts[sections.index(section)]
+                location['section_span'] = [max(0, start - begin), min(len(section['text']), end - begin)]
+            chunks.append(chunk)
+    return chunks
+
+
+def chunk_structured(records: list[dict], size: int = 1200, min_size: int = 300,
+                     measure: Measure = len, budget_id: str = 'characters') -> list[dict]:
+    validate(size, min_size=min_size)
+    config = configuration('structured', size, min_size=min_size, budget_id=budget_id)
+    identity = fingerprint({'config': config, 'records': records})[:16]
+    chunks = []
+    for sections in by_document(records):
+        units = []
+        for section in sections:
+            prefix = header(section['metadata']['title'], section['metadata']['headings'])
+            # The budget includes prefixes, fences, repeated headers, and specials.
+            fits = lambda body, prefix=prefix: measure(prefix + '\n\n' + body) <= size
+            try:
+                for piece in split(section['text'].strip('\n'), size, measure, fits):
+                    units.append((piece, section))
+            except ValueError as error:
+                raise ValueError(f"{section['id']}: {error}") from error
+        groups = []
+        for unit in units:
+            if groups and mergeable(groups[-1], unit, size, min_size, measure):
+                groups[-1].append(unit)
+            else:
+                groups.append([unit])
+        for i, group in enumerate(groups):
+            covered = [section for _, section in group]
+            heads = common_prefix([section['metadata']['headings'] for section in covered])
+            body = '\n\n'.join(piece for piece, _ in group)
+            text = header(covered[0]['metadata']['title'], heads) + '\n\n' + body
+            if measure(text) > size:
+                raise ValueError('Structured chunk exceeds budget.')
+            chunks.append(make_chunk('structured', i, text, body, covered, heads, identity, config))
+    return chunks
+
+
+def split(text: str, size: int, measure: Measure = len,
+          fits: Callable[[str], bool] | None = None) -> list[str]:
+    """Pack blocks. Code splits on lines; tables repeat headers.
+
+    A code line/table row that cannot fit raises an actionable error instead of
+    silently breaking syntax or exceeding the model budget.
+    """
+    validate(size)
+    fits = fits or (lambda value: measure(value) <= size)
+    pieces, current = [], ''
     for block in blocks(text):
-        if current and len(current) + 2 + len(block) <= size:
-            current += "\n\n" + block
-            continue
-        if current:
-            pieces.append(current)
-        if len(block) <= size:
-            current = block
-        else:
-            pieces.extend(fallback.split_text(block))
-            current = ""
+        for unit in split_block(block, size, measure, fits):
+            candidate = current + '\n\n' + unit if current else unit
+            if fits(candidate):
+                current = candidate
+            else:
+                if current:
+                    pieces.append(current)
+                current = unit
     if current:
         pieces.append(current)
     return pieces
 
 
-def blocks(text: str) -> list[str]:
-    """Paragraphs: runs of lines between blank lines. A fenced code block is
-    one block even with blank lines inside it; a table has none, so it is one
-    block already."""
-    result: list[str] = []
-    lines: list[str] = []
-    fenced = False
-    for line in text.splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        if not line.strip() and not fenced:
-            if lines:
-                result.append("\n".join(lines))
-                lines = []
-        else:
-            lines.append(line)
-    if lines:
-        result.append("\n".join(lines))
+def split_block(block, size, measure, fits):
+    if fits(block):
+        return [block]
+    lines = block.splitlines()
+    opening = FENCE.match(lines[0]) if lines else None
+    if opening:
+        fence = opening[1]
+        content = lines[1:-1] if closes_fence(lines[-1], fence) else lines[1:]
+        render = lambda rows: lines[0] + '\n' + '\n'.join(rows) + '\n' + fence
+        kind = 'code line'
+    elif len(lines) >= 2 and '|' in lines[0] and re.fullmatch(
+            r'\s*\|?[\s:|\-]+\|?\s*', lines[1]):
+        content = lines[2:]
+        render = lambda rows: '\n'.join(lines[:2] + rows)
+        kind = 'table row'
+    else:
+        # Generic prose supports arbitrarily long words without touching code.
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=size, chunk_overlap=0, length_function=splitter_measure(measure), strip_whitespace=False)
+        output = []
+        for piece in splitter.split_text(block):
+            pending = [piece]
+            while pending:
+                value = pending.pop(0)
+                if fits(value):
+                    output.append(value)
+                elif len(value) <= 1:
+                    raise ValueError('Budget cannot fit the title/headings and one character; increase --size.')
+                else:
+                    middle = len(value) // 2
+                    pending[0:0] = [value[:middle], value[middle:]]
+        return output
+    result, rows = [], []
+    if not content and not fits(render([])):
+        raise ValueError(f'Budget cannot fit {kind} header; increase --size.')
+    for line in content:
+        if not fits(render([line])):
+            raise ValueError(f'An indivisible {kind} exceeds the complete text budget; increase --size.')
+        if rows and not fits(render(rows + [line])):
+            result.append(render(rows))
+            rows = []
+        rows.append(line)
+    if rows or not content:
+        result.append(render(rows))
     return result
 
 
-def mergeable(group: list[tuple[str, dict]], unit: tuple[str, dict], size: int, min_size: int) -> bool:
-    """Whether `unit` joins the chunk being built: only while that chunk is
-    still under `min_size`, and only if the result stays within `size`."""
-    length = sum(len(piece) + 2 for piece, _ in group) - 2
-    return length < min_size and length + 2 + len(unit[0]) <= size
+def mergeable(group, unit, size, min_size, measure=len):
+    length = measure('\n\n'.join(piece for piece, _ in group))
+    old = group[-1][1]['metadata']['headings']
+    new = unit[1]['metadata']['headings']
+    # Sibling sections may merge; unrelated branches and separate API methods may not.
+    related = old == new or (len(old) >= 2 and len(new) >= 2 and old[:-1] == new[:-1])
+    if not related or length >= min_size:
+        return False
+    combined = group + [unit]
+    heads = common_prefix([section['metadata']['headings'] for _, section in combined])
+    text = header(group[0][1]['metadata']['title'], heads) + '\n\n' + '\n\n'.join(piece for piece, _ in combined)
+    return measure(text) <= size
 
 
-def header(title: str, heads: list[str]) -> str:
-    """"Title > Heading > Subheading", without a first heading that only
-    repeats the title."""
+def header(title, heads):
     if heads and heads[0] == title:
         heads = heads[1:]
-    return " > ".join([title, *heads])
+    return ' > '.join([title, *heads])
 
 
-def common_prefix(lists: list[list[str]]) -> list[str]:
+def common_prefix(lists):
     prefix = lists[0]
     for other in lists[1:]:
         n = 0
@@ -154,49 +259,72 @@ def common_prefix(lists: list[list[str]]) -> list[str]:
     return list(prefix)
 
 
-def make_chunk(strategy: str, i: int, text: str, body: str, covered: list[dict], heads: list[str]) -> dict:
-    first = covered[0]["metadata"]
-    return {
-        "id": f"{strategy}:{first['source']}/{first['doc']}#{i}",
-        "text": text,
-        "body": body,
-        "metadata": {
-            "source": first["source"],
-            "doc": first["doc"],
-            "title": first["title"],
-            "headings": heads,
-            "url": first["url"],
-            "page": first["page"],
-            "sections": list(dict.fromkeys(s["id"] for s in covered)),
-            "strategy": strategy,
-        },
-    }
+def make_chunk(strategy, i, text, body, covered, heads, identity, config):
+    first = covered[0]['metadata']
+    unique = {section['id']: section for section in covered}
+    locations = [{'section_id': section['id'], 'url': section['metadata']['url'],
+                  'page': section['metadata']['page'],
+                  'document_sha256': section['metadata'].get('document_sha256'),
+                  'source_span': section['metadata'].get('source_span'),
+                  'section_span': [0, len(section['text'])]}
+                 for section in unique.values()]
+    return {'id': f"{strategy}:{identity}:{first['source']}/{first['doc']}#{i}",
+            'text': text, 'body': body,
+            'metadata': {'source': first['source'], 'doc': first['doc'], 'title': first['title'],
+                         'headings': heads, 'url': first['url'], 'page': first['page'],
+                         'sections': list(unique), 'locations': locations,
+                         'strategy': strategy, 'configuration': config, 'artifact_id': identity}}
 
 
-def main() -> None:
+STRATEGIES = {'recursive': chunk_recursive, 'structured': chunk_structured}
+
+
+def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--strategy", choices=STRATEGIES, default="structured")
-    parser.add_argument("--size", type=int, default=1200, help="maximum chunk length, in characters")
-    parser.add_argument("--overlap", type=int, default=150, help="recursive: characters shared by neighbours")
-    parser.add_argument("--min-size", type=int, default=300, help="structured: merge sections shorter than this")
+    parser.add_argument('--strategy', choices=STRATEGIES, default='structured')
+    parser.add_argument('--size', type=int, default=1200, help='maximum complete text length in selected units')
+    parser.add_argument('--overlap', type=int, default=150, help='recursive overlap in selected units')
+    parser.add_argument('--min-size', type=int, default=300, help='structured merge threshold in selected units')
+    parser.add_argument('--unit', choices=['characters', 'tokens'], default='characters')
+    parser.add_argument('--tokenizer', type=Path, help='local embedding tokenizer.json; required for token units')
     args = parser.parse_args()
+    measure, budget_id = len, 'characters'
+    if args.unit == 'tokens':
+        if args.tokenizer is None or not args.tokenizer.is_file():
+            parser.error('--unit tokens requires an existing local --tokenizer file')
+        from tokenizers import Tokenizer
+        tokenizer = Tokenizer.from_file(str(args.tokenizer))
+        tokenizer.no_truncation()
+        tokenizer.no_padding()
+        measure = lambda text: len(tokenizer.encode(text, add_special_tokens=True).ids)
+        budget_id = 'tokens:' + file_hash(args.tokenizer)
+    elif args.tokenizer:
+        parser.error('--tokenizer requires --unit tokens')
+    try:
+        records, parsed_manifest = load_parsed(ROOT / 'data' / 'parsed')
+        if args.strategy == 'recursive':
+            chunks = chunk_recursive(records, args.size, args.overlap, measure, budget_id)
+        else:
+            chunks = chunk_structured(records, args.size, args.min_size, measure, budget_id)
+        if not chunks:
+            raise ValueError('No chunks produced; check parsed content.')
+    except (ValueError, FileNotFoundError) as error:
+        parser.error(str(error))
+    out = ROOT / 'data' / 'chunks'
+    run = {'corpus_id': parsed_manifest['corpus_id'], 'configuration': chunks[0]['metadata']['configuration'],
+           'chunker_sha256': file_hash(Path(__file__)),
+           'markdown_sha256': file_hash(Path(__file__).with_name('markdown.py'))}
+    run_id = fingerprint(run)[:16]
+    path = out / f'{args.strategy}-{args.size}-{args.unit}-{run_id}.jsonl'
+    write_jsonl(path, chunks)
+    lengths = sorted(measure(chunk['text']) for chunk in chunks)
+    write_json(path.with_suffix('.manifest.json'), {
+        'schema_version': SCHEMA_VERSION, 'run_id': run_id, **run, 'file': path.name,
+        'sha256': file_hash(path), 'chunks': len(chunks),
+        'lengths': {'median': lengths[len(lengths) // 2], 'max': lengths[-1]}})
+    print(f'{len(records)} sections -> {len(chunks)} chunks, median {lengths[len(lengths) // 2]} '
+          f'{args.unit}, max {lengths[-1]} -> {path.relative_to(ROOT)}')
 
-    records = []
-    for path in sorted((ROOT / "data" / "parsed").glob("*.jsonl")):
-        with path.open(encoding="utf-8") as f:
-            records.extend(json.loads(line) for line in f)
 
-    if args.strategy == "recursive":
-        chunks = chunk_recursive(records, size=args.size, overlap=args.overlap)
-    else:
-        chunks = chunk_structured(records, size=args.size, min_size=args.min_size)
-
-    out = ROOT / "data" / "chunks"
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / f"{args.strategy}-{args.size}.jsonl"
-    with path.open("w", encoding="utf-8") as f:
-        for chunk in chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-    lengths = sorted(len(c["text"]) for c in chunks)
-    print(f"{len(records)} sections -> {len(chunks)} chunks, "
-          f"median {lengths[len(lengths) // 2]} chars, max {lengths[-1]} -> {path.relative_to(ROOT)}")
+if __name__ == '__main__':
+    main()

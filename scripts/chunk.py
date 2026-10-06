@@ -1,4 +1,4 @@
-"""Module 3 - chunk data/parsed/ into data/chunks/<strategy>-<size>.jsonl.
+"""Module 3 - chunk data/parsed/ into data/chunks/<strategy>-<size>-<unit>-<run-id>.jsonl.
 
     uv run scripts/chunk.py --strategy structured --size 1200
     uv run scripts/chunk.py --strategy recursive --size 1200 --overlap 150

@@ -39,7 +39,7 @@ def test_recursive_never_mixes_documents():
     records = [section("a.md", 0, "alpha"), section("b.md", 0, "beta")]
     chunks = chunk_recursive(records, size=200, overlap=0)
     assert [c["metadata"]["doc"] for c in chunks] == ["a.md", "b.md"]
-    assert [c["id"] for c in chunks] == ["recursive:s/a.md#0", "recursive:s/b.md#0"]
+    assert [c["id"].split(':', 2)[-1] for c in chunks] == ['s/a.md#0', 's/b.md#0']
 
 
 def test_recursive_cites_the_page_where_a_chunk_starts():
@@ -55,7 +55,7 @@ def test_recursive_cites_the_page_where_a_chunk_starts():
 
 
 def test_structured_merges_small_sections_within_a_document():
-    records = [section("a.html", i, f"## m{i}()\nMethod {i}.", headings=[f"m{i}()"]) for i in range(3)]
+    records = [section("a.html", i, f"### m{i}()\nMethod {i}.", headings=['Guide', f'm{i}()']) for i in range(3)]
     records.append(section("b.html", 0, "## other\nOther doc."))
     chunks = chunk_structured(records, size=1000, min_size=300)
     assert [c["metadata"]["sections"] for c in chunks] == [
@@ -129,4 +129,4 @@ def test_structured_merged_chunk_uses_shared_headings():
 def test_structured_ids_are_sequential_per_document():
     records = [section("a.md", 0, "x" * 400), section("a.md", 1, "y" * 400), section("b.md", 0, "z")]
     ids = [c["id"] for c in chunk_structured(records, size=1000, min_size=300)]
-    assert ids == ["structured:s/a.md#0", "structured:s/a.md#1", "structured:s/b.md#0"]
+    assert [identifier.split(':', 2)[-1] for identifier in ids] == ['s/a.md#0', 's/a.md#1', 's/b.md#0']

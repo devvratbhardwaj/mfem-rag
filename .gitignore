@@ -412,8 +412,8 @@ TSWLatexianTemp*
 # option is specified. Footnotes are the stored in a file with suffix Notes.bib.
 # Uncomment the next line to have this generated file ignored.
 #*Notes.bib
-cache\
-build\
+cache/
+build/
 
 
 
@@ -438,3 +438,9 @@ workspace.json
 
 # Crawled corpus (module 1)
 data/
+
+# Local parser runtime artifact
+:memory:.ses
+
+# Local review notes and supplementary verification (not project deliverables)
+/.local-review/
