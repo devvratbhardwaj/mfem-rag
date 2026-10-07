@@ -1,0 +1,52 @@
+name: mfem-rag
+
+services:
+  ollama:
+    container_name: container-ollama
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11435:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  models:
+    container_name: container-ollama-models
+    image: ollama/ollama:latest
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      RAG_MODEL: ${RAG_MODEL:-gemma3:270m}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for model in qwen3-embedding:0.6b "$$RAG_MODEL"; do
+          if ollama show "$$model" >/dev/null 2>&1; then
+            echo "Already installed: $$model"
+          else
+            ollama pull "$$model"
+          fi
+        done
+        echo "Models ready"
+
+  qdrant:
+    container_name: container-qdrant
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - "${QDRANT_STORAGE:-./qdrant_storage}:/qdrant/storage:z"
+
+volumes:
+  ollama_models:

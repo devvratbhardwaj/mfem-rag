@@ -439,6 +439,9 @@ workspace.json
 # Crawled corpus (module 1)
 data/
 
+# Local Qdrant database
+/qdrant_storage/
+
 # Local parser runtime artifact
 :memory:.ses
 
